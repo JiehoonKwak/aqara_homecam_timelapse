@@ -55,10 +55,10 @@ def process_chunk(chunk_id, chunk_files, output_dir, speed):
         '-safe', '0',
         '-i', str(list_file_path),
         '-filter:v', f'setpts=PTS/{speed}',
-        '-c:v', 'hevc_videotoolbox',
+        '-c:v', 'h264_videotoolbox',
         '-b:v', '2M',  # Set target bitrate to 2 Mbps
         '-pix_fmt', 'yuv420p',
-        '-an',  # Disable audio
+        # '-an',  # Disable audio
         str(chunk_output_file)
     ]
     try:
@@ -81,7 +81,7 @@ def create_time_lapse_parallel(source_dir, output_file, speed=60):
         print("No MP4 files found to process.")
         return
 
-    num_processes = os.cpu_count() or 12  
+    num_processes = os.cpu_count() or 12
     chunk_size = len(mp4_files) // num_processes + 1
     chunks = [mp4_files[i:i + chunk_size] for i in range(0, len(mp4_files), chunk_size)]
 
@@ -92,7 +92,7 @@ def create_time_lapse_parallel(source_dir, output_file, speed=60):
         ]
         chunk_output_files = [res.get() for res in results]
 
-    # Merge the chunk output files
+    # Merge the chunk output files and re-encode for compatibility
     chunks_list_file = output_dir / 'chunks_list.txt'
     with open(chunks_list_file, 'w') as f:
         for chunk_file in chunk_output_files:
@@ -103,8 +103,10 @@ def create_time_lapse_parallel(source_dir, output_file, speed=60):
         '-f', 'concat',
         '-safe', '0',
         '-i', str(chunks_list_file),
-        '-c', 'copy',
-        '-an',  # Disable audio
+        '-c:v', 'h264_videotoolbox',
+        '-b:v', '2M',  # Adjust bitrate as needed
+        '-pix_fmt', 'yuv420p',
+        # '-an',  # Disable audio
         str(output_path)
     ]
     try:
