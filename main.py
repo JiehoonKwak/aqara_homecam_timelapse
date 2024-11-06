@@ -42,7 +42,7 @@ def mount_smb_share(tailscale_ip, share_name, mount_point, username, password):
         print(f"Failed to mount SMB share: {e}")
         raise
 
-def process_chunk(chunk_id, chunk_files, output_dir, speed):
+def process_chunk(chunk_id, chunk_files, output_dir):
     list_file_path = output_dir / f'files_{chunk_id}.txt'
     chunk_output_file = output_dir / f'chunk_{chunk_id}.mp4'
     with open(list_file_path, 'w') as f:
@@ -50,15 +50,10 @@ def process_chunk(chunk_id, chunk_files, output_dir, speed):
             f.write(f"file '{mp4}'\n")
     ffmpeg_cmd = [
         'ffmpeg',
-        '-hwaccel', 'videotoolbox',
         '-f', 'concat',
         '-safe', '0',
         '-i', str(list_file_path),
-        '-filter:v', f'setpts=PTS/{speed}',
-        '-c:v', 'h264_videotoolbox',
-        '-b:v', '2M',  # Set target bitrate to 2 Mbps
-        '-pix_fmt', 'yuv420p',
-        # '-an',  # Disable audio
+        '-c', 'copy',
         str(chunk_output_file)
     ]
     try:
@@ -87,12 +82,12 @@ def create_time_lapse_parallel(source_dir, output_file, speed=60):
 
     with Pool(num_processes) as pool:
         results = [
-            pool.apply_async(process_chunk, args=(i, chunk, output_dir, speed))
+            pool.apply_async(process_chunk, args=(i, chunk, output_dir))
             for i, chunk in enumerate(chunks)
         ]
         chunk_output_files = [res.get() for res in results]
 
-    # Merge the chunk output files and re-encode for compatibility
+    # Merge the chunk output files and apply time-lapse effect
     chunks_list_file = output_dir / 'chunks_list.txt'
     with open(chunks_list_file, 'w') as f:
         for chunk_file in chunk_output_files:
@@ -103,10 +98,11 @@ def create_time_lapse_parallel(source_dir, output_file, speed=60):
         '-f', 'concat',
         '-safe', '0',
         '-i', str(chunks_list_file),
+        '-filter:v', f'setpts=PTS/{speed}',
         '-c:v', 'h264_videotoolbox',
-        '-b:v', '2M',  # Adjust bitrate as needed
+        '-b:v', '1M',  # do reduce the output file size
         '-pix_fmt', 'yuv420p',
-        # '-an',  # Disable audio
+        '-an',  # Disable audio
         str(output_path)
     ]
     try:
