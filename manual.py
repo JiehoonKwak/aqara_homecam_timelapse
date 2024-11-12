@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from dotenv import load_dotenv
 import shutil
-from multiprocessing import Pool
 
 # Load environment variables from .env file
 load_dotenv()
@@ -14,23 +13,6 @@ directory_labels = {
     "lumi1.54ef4448a02c": "livingRoom",
     "lumi1.54ef4463a098": "swBed"
 }
-
-def input_with_timeout(prompt, timeout=5):
-    """Prompts for input with a timeout; returns None if timeout is reached."""
-    result = [None]
-    
-    def timed_input():
-        result[0] = input(prompt)
-    
-    thread = threading.Thread(target=timed_input)
-    thread.start()
-    thread.join(timeout)
-    
-    if thread.is_alive():
-        print("\nNo input detected; proceeding with default date.")
-        thread.join()  # Ensures thread is cleaned up if timeout is reached
-    
-    return result[0]
 
 def is_mounted(mount_point):
     """Check if the mount point is already mounted."""
@@ -59,81 +41,63 @@ def mount_smb_share(tailscale_ip, share_name, mount_point, username, password):
         print(f"Failed to mount SMB share: {e}")
         raise
 
-def process_chunk(chunk_id, chunk_files, output_dir, speed):
-    list_file_path = output_dir / f'files_{chunk_id}.txt'
-    chunk_output_file = output_dir / f'chunk_{chunk_id}.mp4'
-    with open(list_file_path, 'w') as f:
-        for mp4 in chunk_files:
-            f.write(f"file '{mp4}'\n")
-    ffmpeg_cmd = [
-        'ffmpeg',
-        '-hwaccel', 'videotoolbox',
-        '-f', 'concat',
-        '-safe', '0',
-        '-i', str(list_file_path),
-        '-filter:v', f'setpts=PTS/{speed}',
-        '-c:v', 'hevc_videotoolbox',
-        '-b:v', '2M',  # Set target bitrate to 2 Mbps
-        '-pix_fmt', 'yuv420p',
-        '-an',  # Disable audio
-        str(chunk_output_file)
-    ]
-    try:
-        subprocess.run(ffmpeg_cmd, check=True)
-        print(f"Processed chunk {chunk_id} into {chunk_output_file}")
-    except subprocess.CalledProcessError as e:
-        print(f"Failed to process chunk {chunk_id}: {e}")
-    finally:
-        list_file_path.unlink()
-    return chunk_output_file
-
-def create_time_lapse_parallel(source_dir, output_file, speed=60):
+def merge_mp4_files(source_dir, output_file):
     source_path = Path(source_dir).resolve()
     output_path = Path(output_file).resolve()
-    output_dir = output_path.parent
-    output_dir.mkdir(parents=True, exist_ok=True)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     mp4_files = sorted(source_path.glob('*.mp4'))
     if not mp4_files:
-        print("No MP4 files found to process.")
+        print("No MP4 files found to merge.")
         return
 
-    num_processes = os.cpu_count() or 12  
-    chunk_size = len(mp4_files) // num_processes + 1
-    chunks = [mp4_files[i:i + chunk_size] for i in range(0, len(mp4_files), chunk_size)]
-
-    with Pool(num_processes) as pool:
-        results = [
-            pool.apply_async(process_chunk, args=(i, chunk, output_dir, speed))
-            for i, chunk in enumerate(chunks)
-        ]
-        chunk_output_files = [res.get() for res in results]
-
-    # Merge the chunk output files
-    chunks_list_file = output_dir / 'chunks_list.txt'
-    with open(chunks_list_file, 'w') as f:
-        for chunk_file in chunk_output_files:
-            f.write(f"file '{chunk_file}'\n")
+    list_file_path = source_path / 'files.txt'
+    with open(list_file_path, 'w') as f:
+        for mp4 in mp4_files:
+            f.write(f"file '{mp4}'\n")
 
     merge_cmd = [
         'ffmpeg',
         '-f', 'concat',
         '-safe', '0',
-        '-i', str(chunks_list_file),
+        '-i', str(list_file_path),
         '-c', 'copy',
-        '-an',  # Disable audio
         str(output_path)
     ]
+
     try:
         subprocess.run(merge_cmd, check=True)
+        print(f"Merged video saved as {output_path}")
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to merge videos: {e}")
+    finally:
+        list_file_path.unlink()
+
+def create_time_lapse(input_file, output_file, speed=60):
+    input_path = Path(input_file).resolve()
+    output_path = Path(output_file).resolve()
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    timelapse_cmd = [
+        'ffmpeg',
+        '-hwaccel', 'videotoolbox',
+        '-i', str(input_path),
+        '-filter:v', f"setpts=PTS/{speed}",
+        '-c:v', 'h264_videotoolbox',
+        '-b:v', '2M',  
+        '-preset', 'fast',
+        '-pix_fmt', 'yuv420p',
+        '-an',
+        str(output_path)
+    ]
+
+    try:
+        subprocess.run(timelapse_cmd, check=True)
         print(f"Time-lapse video saved as {output_path}")
     except subprocess.CalledProcessError as e:
-        print(f"Failed to merge chunks: {e}")
-    finally:
-        # Clean up
-        for chunk_file in chunk_output_files:
-            chunk_file.unlink()
-        chunks_list_file.unlink()
+        print(f"Failed to create time-lapse: {e}")
 
 def upload_to_nas(local_file, remote_dir):
     remote_path = f"{os.getenv('MOUNT_POINT')}/{remote_dir}/{Path(local_file).name}"
@@ -142,6 +106,14 @@ def upload_to_nas(local_file, remote_dir):
         print(f"Uploaded {local_file} to NAS at {remote_path}")
     except Exception as e:
         print(f"Failed to upload file: {e}")
+
+def clean_up(files):
+    for file_path in files:
+        try:
+            file_path.unlink()
+            print(f"Removed file {file_path}")
+        except Exception as e:
+            print(f"Failed to remove file {file_path}: {e}")
 
 if __name__ == "__main__":
     # Load configuration from environment variables
@@ -152,14 +124,15 @@ if __name__ == "__main__":
     password = os.getenv('PASSWORD')
     source_directory_base = os.getenv('SOURCE_DIRECTORY_BASE')
     source_directories = os.getenv('SOURCE_DIRECTORIES').split(',')
+    merged_output_dir = os.getenv('MERGED_OUTPUT_DIR')
     timelapse_output_dir = os.getenv('TIMELAPSE_OUTPUT_DIR')
     upload_path = os.getenv('UPLOAD_PATH')
 
     # Process date
-    date = input_with_timeout("Enter date (YYYYMMDD) or leave empty for yesterday: ")
+    date = input("Enter date (YYYYMMDD) or leave empty for yesterday: ")
     if not date:
         date = (datetime.now().date() - timedelta(days=1)).strftime("%Y%m%d")
-
+        
     # Mount the SMB share
     mount_smb_share(
         tailscale_ip=tailscale_ip,
@@ -171,12 +144,12 @@ if __name__ == "__main__":
 
     for directory in source_directories:
         source_directory = f"{mount_point}{source_directory_base}/{directory}/{date}"
+        merged_output = f"{merged_output_dir}/merged_{directory}_{date}.mp4"
+
         label = directory_labels.get(directory, directory)
         timelapse_output = f"{timelapse_output_dir}/timelapse_{label}_{date}.mp4"
 
-        create_time_lapse_parallel(
-            source_dir=source_directory,
-            output_file=timelapse_output,
-            speed=60
-        )
+        merge_mp4_files(source_dir=source_directory, output_file=merged_output)
+        create_time_lapse(input_file=merged_output, output_file=timelapse_output, speed=60)
         upload_to_nas(local_file=timelapse_output, remote_dir=upload_path)
+        clean_up([Path(merged_output)])

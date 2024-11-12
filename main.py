@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from dotenv import load_dotenv
 import shutil
-from multiprocessing import Pool
 
 # Load environment variables from .env file
 load_dotenv()
@@ -42,79 +41,43 @@ def mount_smb_share(tailscale_ip, share_name, mount_point, username, password):
         print(f"Failed to mount SMB share: {e}")
         raise
 
-def process_chunk(chunk_id, chunk_files, output_dir):
-    list_file_path = output_dir / f'files_{chunk_id}.txt'
-    chunk_output_file = output_dir / f'chunk_{chunk_id}.mp4'
-    with open(list_file_path, 'w') as f:
-        for mp4 in chunk_files:
-            f.write(f"file '{mp4}'\n")
-    ffmpeg_cmd = [
-        'ffmpeg',
-        '-f', 'concat',
-        '-safe', '0',
-        '-i', str(list_file_path),
-        '-c', 'copy',
-        str(chunk_output_file)
-    ]
-    try:
-        subprocess.run(ffmpeg_cmd, check=True)
-        print(f"Processed chunk {chunk_id} into {chunk_output_file}")
-    except subprocess.CalledProcessError as e:
-        print(f"Failed to process chunk {chunk_id}: {e}")
-    finally:
-        list_file_path.unlink()
-    return chunk_output_file
-
-def create_time_lapse_parallel(source_dir, output_file, speed=60):
+def create_time_lapse_from_files(source_dir, output_file, speed=60):
     source_path = Path(source_dir).resolve()
     output_path = Path(output_file).resolve()
-    output_dir = output_path.parent
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     mp4_files = sorted(source_path.glob('*.mp4'))
     if not mp4_files:
         print("No MP4 files found to process.")
         return
 
-    num_processes = os.cpu_count() or 12
-    chunk_size = len(mp4_files) // num_processes + 1
-    chunks = [mp4_files[i:i + chunk_size] for i in range(0, len(mp4_files), chunk_size)]
+    list_file_path = source_path / 'files.txt'
+    with open(list_file_path, 'w') as f:
+        for mp4 in mp4_files:
+            f.write(f"file '{mp4}'\n")
 
-    with Pool(num_processes) as pool:
-        results = [
-            pool.apply_async(process_chunk, args=(i, chunk, output_dir))
-            for i, chunk in enumerate(chunks)
-        ]
-        chunk_output_files = [res.get() for res in results]
-
-    # Merge the chunk output files and apply time-lapse effect
-    chunks_list_file = output_dir / 'chunks_list.txt'
-    with open(chunks_list_file, 'w') as f:
-        for chunk_file in chunk_output_files:
-            f.write(f"file '{chunk_file}'\n")
-
-    merge_cmd = [
+    timelapse_cmd = [
         'ffmpeg',
+        '-hwaccel', 'videotoolbox',  # Use hardware acceleration
         '-f', 'concat',
         '-safe', '0',
-        '-i', str(chunks_list_file),
-        '-filter:v', f'setpts=PTS/{speed}',
+        '-i', str(list_file_path),
+        '-filter:v', f"setpts=PTS/{speed}",
         '-c:v', 'h264_videotoolbox',
-        '-b:v', '1M',  # do reduce the output file size
+        '-b:v', '2M',  # Set target bitrate to control file size
+        '-preset', 'fast',  # Speed up encoding
         '-pix_fmt', 'yuv420p',
         '-an',  # Disable audio
         str(output_path)
     ]
+
     try:
-        subprocess.run(merge_cmd, check=True)
+        subprocess.run(timelapse_cmd, check=True)
         print(f"Time-lapse video saved as {output_path}")
     except subprocess.CalledProcessError as e:
-        print(f"Failed to merge chunks: {e}")
+        print(f"Failed to create time-lapse: {e}")
     finally:
-        # Clean up
-        for chunk_file in chunk_output_files:
-            chunk_file.unlink()
-        chunks_list_file.unlink()
+        list_file_path.unlink()
 
 def upload_to_nas(local_file, remote_dir):
     remote_path = f"{os.getenv('MOUNT_POINT')}/{remote_dir}/{Path(local_file).name}"
@@ -136,8 +99,8 @@ if __name__ == "__main__":
     timelapse_output_dir = os.getenv('TIMELAPSE_OUTPUT_DIR')
     upload_path = os.getenv('UPLOAD_PATH')
 
-    # Process date
-    date = (datetime.now().date() - timedelta(days=1)).strftime("%Y%m%d")
+    # Process date : 2일전꺼를 processing (time zone이 맞지를 않음)
+    date = (datetime.now().date() - timedelta(days=2)).strftime("%Y%m%d")
 
     # Mount the SMB share
     mount_smb_share(
@@ -153,7 +116,7 @@ if __name__ == "__main__":
         label = directory_labels.get(directory, directory)
         timelapse_output = f"{timelapse_output_dir}/timelapse_{label}_{date}.mp4"
 
-        create_time_lapse_parallel(
+        create_time_lapse_from_files(
             source_dir=source_directory,
             output_file=timelapse_output,
             speed=60
